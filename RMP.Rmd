@@ -1,0 +1,284 @@
+--- 
+title: "RMP" 
+author: "Nathan Cooper Jones" 
+date: "January 21, 2019" 
+output: html_document 
+--- 
+
+Some Packages (of course) 
+```{r message=FALSE, warning=FALSE} 
+library(rvest) 
+library(tidyverse) 
+library(magrittr) 
+library(scales) 
+library(knitr) 
+library(lubridate) 
+library(RColorBrewer) 
+``` 
+
+Creating our URL string 
+```{r} 
+# URL with the offset field at the end left blank - we'll add on to that soon. 
+url <- "http://www.ratemyprofessors.com/search.jsp?query=illinois+institute+of+technology&queryoption=HEADER&stateselect=&country=&dept=&queryBy=teacherName&facetSearch=true&schoolName=illinois+institute+of+technology&offset=" 
+
+how_many <- url %>% read_html() %>% html_nodes('.result-count') %>% html_text() %>% as.data.frame() 
+# we now have a data table with two rows - the first is garbage from the RMP website while 
+# the second is the actual sentence we want "Showing 1-20 results of ??..." 
+showing_results <- how_many[2, ] # keep only the relevant sentence 
+showing_results_but_no_showing <- sub(".* of ", "", showing_results) # Get rid of everything after the word 'of' 
+max_number <- parse_number(showing_results_but_no_showing) # Extract the integer 
+
+num_offsets <- max_number - (max_number %% 20) # Make it a multiple of 20 
+
+offset_values <- seq(0, num_offsets, by = 20) # Generate a sequence of multiples of 20s to the limit 
+
+unitedata<- function(x) { 
+  full_url <- paste0(url, x) 
+  full_url 
+} 
+
+finalurl <- unitedata(offset_values) # Create all the URLs with different offset values that we will scrape from 
+``` 
+
+Designing our scraper using HTML elements
+```{r} 
+rmp_scrape_for_links <- function(x) { 
+  page <- x
+  name <- page %>% read_html() %>% html_nodes('.main') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  url <- page %>% read_html() %>% html_nodes('.PROFESSOR a') %>% html_attr('href') %>% as.data.frame(stringsAsFactors = FALSE) 
+  subject <- page %>% read_html() %>% html_nodes('.sub') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  
+  # Combine the features, name them, return them, then rest :) 
+  links <- cbind(name, url, subject) 
+  names(links) <- c("Name", "URL", "Subject") 
+  return(links) 
+  Sys.sleep(5) 
+} 
+``` 
+
+Execute the scraper to run through the sequence of urls (takes a few seconds) 
+```{r} 
+professor_links <- map_df(finalurl, rmp_scrape_for_links) 
+``` 
+
+Some cleaning to organize our data 
+```{r}
+first_name <- sub(".*,", "", professor_links$Name) # extract first name 
+last_name <- sub(",.*", "", professor_links$Name) # extract last name 
+professor_links$Name <- paste(first_name, last_name) # marry the two 
+professor_links$Name <- trimws(professor_links$Name) # kill the whitespace 
+professor_links$URL <- paste0("http://www.ratemyprofessors.com", professor_links$URL) # make it a full url 
+professor_links$Subject <- sub(".*, ", "", professor_links$Subject) # trim the school name from the subject 
+professor_links <- unique(professor_links) # remove duplicates 
+professor_links <- as.tibble(professor_links) # i like tibbles :) 
+
+
+professor_links 
+``` 
+
+Let's start by just taking CS professors... 
+```{r} 
+full_subject_name <-"Computer Science" 
+abbreviated_subject_name <- "CS" 
+
+cs_professors <- professor_links %>% 
+  filter(Subject == full_subject_name) 
+
+cs_professors 
+``` 
+
+... and let's get ratings! (this one takes an actual hot minute to do) 
+```{r} 
+rmp_scrape_for_ratings <- function(x) { 
+  page <- x 
+  name <- page %>% read_html() %>% html_nodes('.profname') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  course <- page %>% read_html() %>% html_nodes('.name .response') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  rating <- page %>% read_html() %>% html_nodes('.rating-type') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  overall_quality <- page %>% read_html() %>% html_nodes('.break:nth-child(1) .score') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  difficulty_level <- page %>% read_html() %>% html_nodes('.inverse') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  comments <- page %>% read_html() %>% html_nodes('.commentsParagraph') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  name_rep <- rep(name$.[1], nrow(rating)) 
+  
+  if (length(name_rep) == 0 || nrow(course) == 0 || nrow(rating) == 0 || nrow(overall_quality) == 0 || nrow(difficulty_level) == 0 || nrow(comments) == 0) { 
+    return() # no empty dataframes! 
+  } 
+    
+  # combining, naming, classifying our variables 
+  ratings <- cbind(name_rep, course, rating, overall_quality, difficulty_level, comments) 
+  ratings[] <- lapply(ratings, as.character) 
+  names(ratings) <- c("Name", "Course", "Rating", "Quality", "Difficulty", "Comments") 
+  return(ratings) 
+  Sys.sleep(5) 
+} 
+
+professor_ratings <- map_df(cs_professors$URL, rmp_scrape_for_ratings) 
+``` 
+
+Some cleaning to organize our data 
+```{r} 
+professor_ratings$Name <- gsub("\r\n ", "", professor_ratings$Name) # get rid of \r\n in the name 
+professor_ratings$Name <- trimws(professor_ratings$Name) # trime whitspace 
+professor_ratings$Comments <- gsub("\r\n ", "", professor_ratings$Comments) # ditto for the comments 
+professor_ratings$Comments <- trimws(professor_ratings$Comments) # ditto ditto 
+professor_ratings$Rating <- as.factor(professor_ratings$Rating) # make rating a factor 
+professor_ratings$Quality <- as.numeric(professor_ratings$Quality) # make quality a numeric 
+professor_ratings$Difficulty <- as.numeric(professor_ratings$Difficulty) # make difficulty a numeric 
+
+numbers_only <- function(x) !grepl("\\D", x) # a fun regular expression to make sure a string is numbers only 
+
+# Okay, time to clean up the courses. First, we make sure that the course has a number in it AND it is either 1) strictly numbers or 2) has the word "CS" in it 
+# If these conditions are true, keep it as is, if not, replace it with 0 (which will represent our "Other" category) 
+# Put everything in a new column, `Course_Number` 
+professor_ratings$Course_Number <- ifelse(grepl("\\d", professor_ratings$Course) & (numbers_only(professor_ratings$Course) | grepl(abbreviated_subject_name, professor_ratings$Course)), professor_ratings$Course, 0) 
+professor_ratings$Course_Number <- gsub("[^0-9]", "", professor_ratings$Course_Number) # parse the number from the course 
+professor_ratings$Course_Number <- as.numeric(professor_ratings$Course_Number) # Course_Number is numeric or else the next line won't work... 
+
+two_courses <- professor_ratings %>% 
+  filter(Course_Number >= 100000 & Course_Number <= 999999) # capture reviews with two courses attached (six digits total) 
+
+two_courses$Course_Number <- as.numeric(as.character(substr(two_courses$Course_Number, 4, 6))) # just get the last three-digit course 
+professor_ratings$Course_Number <- as.numeric(as.character(substr(professor_ratings$Course_Number, 1, 3))) # just get the first three-digit course 
+professor_ratings <- rbind(professor_ratings, two_courses) # combine the two :) 
+
+# If the course number is less than 100, it doesn't exist at Illinois Tech. This is a section number usually, so throw it out! 
+# If it's bigger than 999999, it's three courses? Who does that? This is where I draw the line. 
+professor_ratings$Course_Number <- ifelse(professor_ratings$Course_Number < 100 | professor_ratings$Course_Number > 999999, 0, professor_ratings$Course_Number) 
+professor_ratings$Course_Number <- ifelse(professor_ratings$Course_Number == 0, "Other", professor_ratings$Course_Number) # make the "Other" category official 
+
+professor_ratings <- as.tibble(unique(professor_ratings)) # i still like tibbles 
+
+professor_ratings 
+``` 
+
+IMDb's True Bayesian Rating: 
+
+Weighted Rating (WR) = (v ÷ (v+m)) × R + (m ÷ (v+m)) × C , where: 
+
+* R = average for the movie (mean) = (Rating) 
+* v = number of votes for the movie = (votes) 
+* m = minimum votes required to be listed in the Top 250 (currently 3000) 
+* C = the mean vote across the whole report (currently 6.9) 
+
+Analysis 
+```{r} 
+weighted_rankings_df <- tibble(Department = character(), Course = character(), Ranking = character()) # blank dataframe to add on to soon 
+
+for (course in sort(unique(professor_ratings$Course_Number))) { 
+  course_ratings <- professor_ratings %>% 
+    filter(Course_Number == course) 
+  
+  min_votes <- floor(nrow(professor_ratings) / length(unique(professor_ratings$Course_Number))) # floor of the average number of votes per class 
+  num_votes <- nrow(course_ratings) # number of votes for the course 
+  course_average <- mean(course_ratings$Quality) # average quality rating for the course 
+  department_average <- mean(professor_ratings$Quality) # average quality rating for the entire CS department 
+  
+  # (WR) = (v ÷ (v+m)) × R + (m ÷ (v+m)) × C 
+  weighted_rating <- (num_votes / (num_votes + min_votes)) * course_average + (min_votes / (num_votes + min_votes)) * department_average 
+
+  # add results to dataframe to look at later 
+  weighted_rankings_df <- rbind(weighted_rankings_df, tibble(Department = abbreviated_subject_name, Course = course, Ranking = round(weighted_rating, 2))) 
+  
+  cat(paste("Weighted Quality Rating for", abbreviated_subject_name, course, "is", round(weighted_rating, 2), "\n")) 
+} 
+
+worst_course <- weighted_rankings_df %>% 
+  filter(Ranking == min(weighted_rankings_df$Ranking)) 
+worst_course 
+
+best_course <- weighted_rankings_df %>% 
+  filter(Ranking == max(weighted_rankings_df$Ranking)) 
+best_course 
+
+worst_course_full <- professor_ratings %>% 
+  filter(Course_Number %in% worst_course$Course) 
+worst_course_full 
+
+best_course_full <- professor_ratings %>% 
+  filter(Course_Number %in% best_course$Course) 
+best_course_full 
+``` 
+
+Visualization 
+```{r warning=FALSE} 
+for (x in seq(100, 500, 100)) { 
+  ratings_by_level <- professor_ratings %>% 
+    filter(!is.na(Course_Number) & Course_Number >= x & Course_Number < x + 100) 
+  
+  print(ratings_by_level %>% 
+    ggplot(aes(x = as.factor(Quality), fill = as.factor(Quality))) + 
+      geom_bar(width = 0.95) + 
+      labs(title = paste0("Quality for ", x, "-level courses"), subtitle = paste0("n = ", nrow(ratings_by_level)), x = "Quality") + 
+      theme(legend.position="none", 
+            plot.subtitle = element_text(size=9, face="italic")) + 
+      scale_fill_brewer(palette = "RdYlGn")) 
+  
+  print(ratings_by_level %>% 
+    ggplot(aes(x = Difficulty, fill = as.factor(Difficulty))) + 
+      geom_bar(width = 0.95) + 
+      labs(title = paste0("Difficulty for ", x, "-level courses"), subtitle = paste0("n = ", nrow(ratings_by_level))) + 
+      theme(legend.position="none", 
+            plot.subtitle = element_text(size=9, face="italic")) + 
+      scale_fill_brewer(palette = "YlOrRd")) 
+} 
+
+professor_ratings %>% 
+  ggplot(aes(x = Quality, fill = as.factor(Quality))) + 
+    geom_bar(width = 0.45) + 
+    scale_fill_brewer(palette = "RdYlGn") + 
+    theme(legend.position = "none") + 
+    labs(title = paste0("Quality of ", abbreviated_subject_name, " Courses"), 
+         x = "Quality", 
+         y = "Count") + 
+    geom_vline(aes(xintercept = mean(Quality)), col = 'black', linetype = "dashed") 
+
+average_quality <- mean(professor_ratings$Quality) 
+average_quality 
+
+median_quality <- median(professor_ratings$Quality) 
+median_quality 
+
+professor_ratings %>% 
+  ggplot(aes(x = Difficulty, fill = as.factor(Difficulty))) + 
+    geom_bar(width = 0.95) + 
+    scale_fill_brewer(palette = "YlOrRd") + 
+    theme(legend.position = "none") + 
+    labs(title = paste0("Difficulty of ", abbreviated_subject_name, " Courses"), 
+         x = "Difficulty", 
+         y = "Count") + 
+    geom_vline(aes(xintercept = mean(Difficulty)), col = 'black', linetype = "dashed") 
+
+average_difficulty <- mean(professor_ratings$Difficulty) 
+average_difficulty 
+
+median_difficulty <- median(professor_ratings$Difficulty) 
+median_difficulty 
+``` 
+
+Some Basic NLP 
+```{r} 
+library(sentimentr) 
+  
+comment_sentiments <- sentiment(professor_ratings$Comments) 
+
+comment_sentiments %>% 
+  ggplot(aes(x = sentiment, fill = as.factor(round(sentiment, 0)))) + 
+    geom_histogram(bins = 25, alpha = 0.8) + 
+    scale_fill_brewer(palette = "RdYlGn") + 
+    theme(legend.position = "none") + 
+    labs(title = paste0("Sentiment Analysis for ", abbreviated_subject_name, " Courses"), 
+         x = "Sentiment", 
+         y = "Count") + 
+    geom_vline(aes(xintercept = mean(sentiment)), col = 'black', linetype = "dashed") 
+
+average_sentiment <- mean(comment_sentiments$sentiment) 
+average_sentiment 
+
+median_sentiment <- median(comment_sentiments$sentiment) 
+median_sentiment 
+
+extract_sentiment_terms(professor_ratings$Comments) 
+
+professor_ratings$Comments %>% 
+  sentiment_by(by = NULL) %>% 
+  highlight() 
+``` 
