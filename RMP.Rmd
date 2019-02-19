@@ -1,27 +1,39 @@
 --- 
-title: "RMP" 
-author: "Nathan Cooper Jones" 
-date: "January 21, 2019" 
+title: | 
+  <center>Rate My Professor: is it always bad?</center> 
+  <p></p> 
+  <center><sup>A Code Sample for ShopRunner</sup></center> 
+author: <center>Nathan Cooper Jones</center> 
+date: <center>February 21, 2019</center> 
 output: html_document 
 --- 
 
-Some Packages (of course) 
-```{r message=FALSE, warning=FALSE} 
-library(rvest) 
-library(tidyverse) 
-library(magrittr) 
-library(scales) 
-library(knitr) 
-library(lubridate) 
-library(RColorBrewer) 
+The code that fueled my blog post here: https://nathancooperjones.com/rate-my-professor-is-it-always-bad/ 
+
+```{r include=FALSE, message=FALSE, warning=FALSE} 
+# SOME LIBRARIES I USE 
+library(rvest) # to web scrape 
+library(tidyverse) # for PIPES AND BEAUTY! 
+library(lubridate) # turn our dates into dates 
+library(RColorBrewer) # make our colors easy, breezy, beautiful 
+library(stringr) # good for string manipulation 
+library(caret) # bootstrap, data partitions, oh my! 
+library(glmnet) # run a logistic regression 
+library(ROCR) # calculate AUC 
+library(sentimentr) # sentiment analysis made easy! 
 ``` 
 
-Creating our URL string 
+# Getting and Cleaning the Data 
+## Web Scrape Round 1: Show me the professors! 
+The first web scrape I'll be doing will start here, where I'll collect the name, subject, and URL to the reviews page for each professor. One minor challenge was the ability to scrape more than just the first page of 20 professors and not have to "hard-code" a single limit to search until (if the limit is 654 today, next semester it could be 672 and a "hard-coded" limit would be missing out on those newly-added professors). To do this, we just web scrape the total number of results, make it a multiple of 20, and iterate through each multiple of 20 up to that limit, setting the website offset to this to generate a page of new professors. 
+
+<sub>\* As a quick aside: I used Jake Daniel’s wonderful web-scraping R code template you can read more about here (https://datacritics.com/2018/03/20/scrape-it-yourself-spotify-charts/) and the Google Chrome tool SelectorGadget found here (https://chrome.google.com/webstore/detail/selectorgadget/mhjhnkcfbdhnjickkkdbjoemdmbfginb) to make this a bit easier on myself. With that, we’ll start our journey at the RMP professor search page for my university, Illinois Institute of Technology.</sup> 
 ```{r} 
 # URL with the offset field at the end left blank - we'll add on to that soon. 
 url <- "http://www.ratemyprofessors.com/search.jsp?query=illinois+institute+of+technology&queryoption=HEADER&stateselect=&country=&dept=&queryBy=teacherName&facetSearch=true&schoolName=illinois+institute+of+technology&offset=" 
 
 how_many <- url %>% read_html() %>% html_nodes('.result-count') %>% html_text() %>% as.data.frame() 
+
 # we now have a data table with two rows - the first is garbage from the RMP website while 
 # the second is the actual sentence we want "Showing 1-20 results of ??..." 
 showing_results <- how_many[2, ] # keep only the relevant sentence 
@@ -38,10 +50,7 @@ unitedata<- function(x) {
 } 
 
 finalurl <- unitedata(offset_values) # Create all the URLs with different offset values that we will scrape from 
-``` 
 
-Designing our scraper using HTML elements
-```{r} 
 rmp_scrape_for_links <- function(x) { 
   page <- x
   name <- page %>% read_html() %>% html_nodes('.main') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
@@ -52,16 +61,12 @@ rmp_scrape_for_links <- function(x) {
   links <- cbind(name, url, subject) 
   names(links) <- c("Name", "URL", "Subject") 
   return(links) 
-  Sys.sleep(5) 
 } 
-``` 
-
-Execute the scraper to run through the sequence of urls (takes a few seconds) 
-```{r} 
 professor_links <- map_df(finalurl, rmp_scrape_for_links) 
+head(professor_links) 
 ``` 
 
-Some cleaning to organize our data 
+## Data Cleaning Round 1: This isn't <em>that</em> bad... 
 ```{r}
 first_name <- sub(".*,", "", professor_links$Name) # extract first name 
 last_name <- sub(",.*", "", professor_links$Name) # extract last name 
@@ -70,24 +75,13 @@ professor_links$Name <- trimws(professor_links$Name) # kill the whitespace
 professor_links$URL <- paste0("http://www.ratemyprofessors.com", professor_links$URL) # make it a full url 
 professor_links$Subject <- sub(".*, ", "", professor_links$Subject) # trim the school name from the subject 
 professor_links <- unique(professor_links) # remove duplicates 
-professor_links <- as.tibble(professor_links) # i like tibbles :) 
+professor_links <- as_tibble(professor_links) # i like tibbles :) 
 
-
-professor_links 
+head(professor_links) 
 ``` 
 
-Let's start by just taking CS professors... 
-```{r} 
-full_subject_name <-"Computer Science" 
-abbreviated_subject_name <- "CS" 
-
-cs_professors <- professor_links %>% 
-  filter(Subject == full_subject_name) 
-
-cs_professors 
-``` 
-
-... and let's get ratings! (this one takes an actual hot minute to do) 
+## Web Scrape Round 2: This might take a while... 
+Our objective is now clear: copy and paste what we just did above with our web scraper and use it again to get individual ratings for each of the URLs in our dataframe. Sounds simple, but it does take a while to run since we'll be scraping all information we possibly can for each rating. If you listen to The Allman Brothers' song “Mountain Jam” while this runs - it'll be over before the song is, guranteed! 
 ```{r} 
 rmp_scrape_for_ratings <- function(x) { 
   page <- x 
@@ -97,44 +91,68 @@ rmp_scrape_for_ratings <- function(x) {
   overall_quality <- page %>% read_html() %>% html_nodes('.break:nth-child(1) .score') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
   difficulty_level <- page %>% read_html() %>% html_nodes('.inverse') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
   comments <- page %>% read_html() %>% html_nodes('.commentsParagraph') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  tags <- page %>% read_html() %>% html_nodes('.tagbox') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  helpful <- page %>% read_html() %>% html_nodes('.helpful .count') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  nothelpful <- page %>% read_html() %>% html_nodes('.nothelpful .count') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  grade <- page %>% read_html() %>% html_nodes('.grade .response') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  take_again <- page %>% read_html() %>% html_nodes('.would-take-again .response') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  textbook <- page %>% read_html() %>% html_nodes('.textbook-used .response') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  attendance <- page %>% read_html() %>% html_nodes('.attendance .response ') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  for_credit <- page %>% read_html() %>% html_nodes('.credit .response ') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
+  date <- page %>% read_html() %>% html_nodes('.date  ') %>% html_text() %>% as.data.frame(stringsAsFactors = FALSE) 
   name_rep <- rep(name$.[1], nrow(rating)) 
   
-  if (length(name_rep) == 0 || nrow(course) == 0 || nrow(rating) == 0 || nrow(overall_quality) == 0 || nrow(difficulty_level) == 0 || nrow(comments) == 0) { 
+  if (nrow(course) == 0) { 
     return() # no empty dataframes! 
   } 
     
   # combining, naming, classifying our variables 
-  ratings <- cbind(name_rep, course, rating, overall_quality, difficulty_level, comments) 
+  ratings <- cbind(name_rep, course, rating, overall_quality, difficulty_level, comments, tags, helpful, nothelpful, grade, 
+                   take_again, textbook, attendance, for_credit, date) 
   ratings[] <- lapply(ratings, as.character) 
-  names(ratings) <- c("Name", "Course", "Rating", "Quality", "Difficulty", "Comments") 
+  names(ratings) <- c("Name", "Course", "Rating", "Quality", "Difficulty", "Comments", "Tags", "NumHelpful", "NumNotHelpful", 
+                      "Grade", "WouldTakeAgain", "TextbookUsed", "AttendanceRequired", "ForCredit", "Date") 
   return(ratings) 
-  Sys.sleep(5) 
 } 
 
-professor_ratings <- map_df(cs_professors$URL, rmp_scrape_for_ratings) 
+professor_ratings <- map_df(professor_links$URL, rmp_scrape_for_ratings) 
+professor_ratings_temp <- professor_ratings # in case I mess it all up permanently... 
+head(professor_ratings) 
 ``` 
 
-Some cleaning to organize our data 
+## Data Cleaning Round 2: Okay this isn't great... 
+Looking at the dataframe we just scraped together, there are a lot of messy values in the columns that can be pretty simply cleaned. 
+
+The biggest addition we'll do is adding in the `Course_Number`s rather than just using the `Course`. Some courses included letters (like “CS553”) in front, others were reviews for a single course number (like “553”), some two courses combined in one review (like “CHEM122124”), some had a section number thrown in there (like “CS55301”), and some just said the full course name with no abbreviations (like "DATAMINING", which is more work to write than just a number in my opinion). Through all this mess, the code below cleans up the dataframe well-enough in a completely automated sense. To address the weird course issue, I mark all non-number-having courses as the course number `-1`, strip the course numbers to, of course, be just numbers, split six-digit numbers (AKA two courses reviewed in one) as two separate courses with the same review, and make it all pretty. In addition, we make `Course_Level`s (100s, 200s, 300s, etc.) which is a simple extension off of course number. 
+
+The tags on the other hand... a mess! If a rating has three separate tags listed for a course review, for example "CARING", "SKIP CLASS? YOU WON'T PASS.", and "HILARIOUS", they are listed in the `Tags` column as a single string, "CARING SKIP CLASS? YOU WON'T PASS. HILARIOUS", which doesn't lend itself well for analysis. So, rather than having R do it for me automatically like any other analysis, I'm creating dummy variables manually with either `0` or `1` values of whether the tag was in the `Tag` column. Now a computer can read and understand just how good (or bad) professors truly are with tags. 
+
+Almost done! The last thing I do here is create a column called `GoodProf` which I'll be using for analysis a bit later on. The rules are simple: if the quality of the course review is greater than or equal to 3.5, it's marked as a good professor! If not, it's a bad one - easy! 
+
+<sub>\*I took a bit of inspiration on this criteria based on this paper doing something pretty similar: http://web.eecs.umich.edu/~mihalcea/papers/azab.socinfo16.pdf (but I promise, I found it well after my work on this project!).</sub> 
 ```{r} 
-professor_ratings$Name <- gsub("\r\n ", "", professor_ratings$Name) # get rid of \r\n in the name 
-professor_ratings$Name <- trimws(professor_ratings$Name) # trime whitspace 
-professor_ratings$Comments <- gsub("\r\n ", "", professor_ratings$Comments) # ditto for the comments 
-professor_ratings$Comments <- trimws(professor_ratings$Comments) # ditto ditto 
-professor_ratings$Rating <- as.factor(professor_ratings$Rating) # make rating a factor 
-professor_ratings$Quality <- as.numeric(professor_ratings$Quality) # make quality a numeric 
-professor_ratings$Difficulty <- as.numeric(professor_ratings$Difficulty) # make difficulty a numeric 
-
+## DEFINE HELPER FUNCTIONS ## 
 numbers_only <- function(x) !grepl("\\D", x) # a fun regular expression to make sure a string is numbers only 
+floorHundred <- function(x) x - x %% 100 
 
+## REMOVE \r\n, excess whitespace, and replace `N/A` with NA ## 
+for (col in names(professor_ratings)) { 
+  professor_ratings[[col]] <- gsub("\r\n ", "", professor_ratings[[col]]) # get rid of \r\n in the name 
+  professor_ratings[[col]] <- gsub("N/A", NA, professor_ratings[[col]]) # make our NAs official! 
+  professor_ratings[[col]] <- trimws(professor_ratings[[col]]) # trime whitspace 
+} 
+
+## CREATE COURSE NUMBERS AND LEVELS, A SIMPLIFCATION OF COURSE## 
 # Okay, time to clean up the courses. First, we make sure that the course has a number in it AND it is either 1) strictly numbers or 2) has the word "CS" in it 
 # If these conditions are true, keep it as is, if not, replace it with 0 (which will represent our "Other" category) 
 # Put everything in a new column, `Course_Number` 
-professor_ratings$Course_Number <- ifelse(grepl("\\d", professor_ratings$Course) & (numbers_only(professor_ratings$Course) | grepl(abbreviated_subject_name, professor_ratings$Course)), professor_ratings$Course, 0) 
+professor_ratings$Course_Number <- ifelse(grepl("\\d", professor_ratings$Course), professor_ratings$Course, 0) 
 professor_ratings$Course_Number <- gsub("[^0-9]", "", professor_ratings$Course_Number) # parse the number from the course 
 professor_ratings$Course_Number <- as.numeric(professor_ratings$Course_Number) # Course_Number is numeric or else the next line won't work... 
 
 two_courses <- professor_ratings %>% 
-  filter(Course_Number >= 100000 & Course_Number <= 999999) # capture reviews with two courses attached (six digits total) 
+  filter(Course_Number >= 100000 & Course_Number <= 999999) %>% # capture reviews with two courses attached (six digits total) 
+  mutate(Course = ".") 
 
 two_courses$Course_Number <- as.numeric(as.character(substr(two_courses$Course_Number, 4, 6))) # just get the last three-digit course 
 professor_ratings$Course_Number <- as.numeric(as.character(substr(professor_ratings$Course_Number, 1, 3))) # just get the first three-digit course 
@@ -143,42 +161,81 @@ professor_ratings <- rbind(professor_ratings, two_courses) # combine the two :)
 # If the course number is less than 100, it doesn't exist at Illinois Tech. This is a section number usually, so throw it out! 
 # If it's bigger than 999999, it's three courses? Who does that? This is where I draw the line. 
 professor_ratings$Course_Number <- ifelse(professor_ratings$Course_Number < 100 | professor_ratings$Course_Number > 999999, 0, professor_ratings$Course_Number) 
-professor_ratings$Course_Number <- ifelse(professor_ratings$Course_Number == 0, "Other", professor_ratings$Course_Number) # make the "Other" category official 
+professor_ratings$Course_Level <- ifelse(professor_ratings$Course_Number == 0, -1, floorHundred(as.numeric(professor_ratings$Course_Number))) # make the "Other" category official 
 
-professor_ratings <- as.tibble(unique(professor_ratings)) # i still like tibbles 
+## TAGS, MEET DUMMY VARIABLES! ## 
+all_possible_tags <- c("TOUGH GRADER", "GIVES GOOD FEEDBACK", "RESPECTED", "GET READY TO READ", "PARTICIPATION MATTERS", "SKIP CLASS? YOU WON'T PASS.", 
+              "LOTS OF HOMEWORK", "INSPIRATIONAL", "BEWARE OF POP QUIZZES", "ACCESSIBLE OUTSIDE CLASS", "SO MANY PAPERS", "CLEAR GRADING CRITERIA", 
+              "HILARIOUS", "TEST HEAVY", "GRADED BY FEW THINGS", "AMAZING LECTURES", "CARING", "EXTRA CREDIT", "GROUP PROJECTS", "LECTURE HEAVY") 
+for (tag in all_possible_tags) { 
+  tag_col <- gsub("([[:punct:]])|\\s+", "_", tag) # replace spaces and punctuation with `_` 
+  tag_col <- gsub("__", "_", tag_col) # replace __ with _ 
+  tag_df_col <- as.factor(as.numeric(grepl(tag, professor_ratings$Tags))) 
+  if (length(levels(tag_df_col)) > 1) { 
+    professor_ratings[[paste0("TAG_", tag_col)]] <- tag_df_col 
+  } 
+} 
 
-professor_ratings 
+## SETTING DATA TYPES ## 
+professor_ratings$Rating <- as.factor(professor_ratings$Rating) # make rating a factor 
+professor_ratings$Quality <- as.numeric(professor_ratings$Quality) # make quality a numeric 
+professor_ratings$Difficulty <- as.numeric(professor_ratings$Difficulty) # make difficulty a numeric 
+professor_ratings$NumHelpful <- as.numeric(professor_ratings$NumHelpful) 
+professor_ratings$NumNotHelpful <- as.numeric(professor_ratings$NumNotHelpful) 
+professor_ratings$AttendanceRequired <- as.factor(professor_ratings$AttendanceRequired) 
+professor_ratings$ForCredit <- as.factor(professor_ratings$ForCredit) 
+professor_ratings$TextbookUsed <- as.factor(professor_ratings$TextbookUsed) 
+professor_ratings$WouldTakeAgain <- as.factor(professor_ratings$WouldTakeAgain) 
+professor_ratings$Grade <- as.factor(professor_ratings$Grade) 
+professor_ratings$Date <- as.Date(professor_ratings$Date, "%m/%d/%Y") 
+
+## CREATE TARGET VARIABLE ## 
+professor_ratings$GoodProf <- as.factor(ifelse(professor_ratings$Quality >= 3.5, 1, 0)) 
+
+professor_ratings <- as_tibble(unique(professor_ratings)) # i just really like tibbles 
+head(professor_ratings) 
 ``` 
 
-IMDb's True Bayesian Rating: 
+# Analysis and Visualization 
+## Nathan - what's the best (and worst) course? 
 
-Weighted Rating (WR) = (v ÷ (v+m)) × R + (m ÷ (v+m)) × C , where: 
+This task initially stumped me. If a class has a single negative review with quality 1.0 and another class has three negative reviews with quality 1.5, which class is worse? I believe the latter, but how can we quantify this? The answer is, actually, through IMDb, believe it or not. 
+
+<strong>IMDb's True Bayesian Rating</strong>: 
+
+Weighted Rating (WR) = $$(\frac{v}{v+m} · R) + (\frac{m}{v+m} · C)$$, where: 
 
 * R = average for the movie (mean) = (Rating) 
 * v = number of votes for the movie = (votes) 
 * m = minimum votes required to be listed in the Top 250 (currently 3000) 
 * C = the mean vote across the whole report (currently 6.9) 
 
-Analysis 
+Applying this true ‘Bayesian estimate’ formula using our professor reviews in lieu of movies, we can conclude that the highest-reviewed (and lowest-reviewed) courses at Illinois Tech are... 
 ```{r} 
-weighted_rankings_df <- tibble(Department = character(), Course = character(), Ranking = character()) # blank dataframe to add on to soon 
+weighted_rankings_df <- tibble(Course = character(), Ranking = character()) # blank dataframe to add on to soon 
+total_courses <- length(unique((professor_ratings %>% 
+                filter(Course_Level > 0))$Course)) # total courses with valid `Course_Levels` 
+department_average <- mean((professor_ratings %>% 
+                filter(Course_Level > 0))$Quality, na.rm = TRUE)  # average quality rating courses with valid `Course_Levels` 
 
-for (course in sort(unique(professor_ratings$Course_Number))) { 
+for (course in sort(unique(professor_ratings$Course))) { 
   course_ratings <- professor_ratings %>% 
-    filter(Course_Number == course) 
+    filter(Course == course) 
   
-  min_votes <- floor(nrow(professor_ratings) / length(unique(professor_ratings$Course_Number))) # floor of the average number of votes per class 
+  if (!any(course_ratings$Course_Level > 0)) { 
+    next 
+  } 
+  
+  min_votes <- floor(nrow(professor_ratings) / total_courses) # floor of the average number of votes per class 
   num_votes <- nrow(course_ratings) # number of votes for the course 
   course_average <- mean(course_ratings$Quality) # average quality rating for the course 
-  department_average <- mean(professor_ratings$Quality) # average quality rating for the entire CS department 
-  
+
   # (WR) = (v ÷ (v+m)) × R + (m ÷ (v+m)) × C 
   weighted_rating <- (num_votes / (num_votes + min_votes)) * course_average + (min_votes / (num_votes + min_votes)) * department_average 
 
   # add results to dataframe to look at later 
-  weighted_rankings_df <- rbind(weighted_rankings_df, tibble(Department = abbreviated_subject_name, Course = course, Ranking = round(weighted_rating, 2))) 
-  
-  cat(paste("Weighted Quality Rating for", abbreviated_subject_name, course, "is", round(weighted_rating, 2), "\n")) 
+  weighted_rankings_df <- rbind(weighted_rankings_df, tibble(Course = course, Ranking = round(weighted_rating, 2))) 
+
 } 
 
 worst_course <- weighted_rankings_df %>% 
@@ -190,19 +247,25 @@ best_course <- weighted_rankings_df %>%
 best_course 
 
 worst_course_full <- professor_ratings %>% 
-  filter(Course_Number %in% worst_course$Course) 
-worst_course_full 
+  filter(Course %in% worst_course$Course) 
+worst_course_full$Comments 
 
 best_course_full <- professor_ratings %>% 
-  filter(Course_Number %in% best_course$Course) 
-best_course_full 
+  filter(Course %in% best_course$Course) 
+best_course_full$Comments 
+
 ``` 
 
-Visualization 
+## Give me Some <em>Quality</em> Bar Plots! 
+After all the work setting up `Course_Number` and `Course_Level`, does it pay off some interesting results? Well... kinda! 
 ```{r warning=FALSE} 
-for (x in seq(100, 500, 100)) { 
+for (x in sort(unique(professor_ratings$Course_Level[professor_ratings$Course_Level > 0]))) { 
   ratings_by_level <- professor_ratings %>% 
-    filter(!is.na(Course_Number) & Course_Number >= x & Course_Number < x + 100) 
+    filter(!is.na(Course_Level) & Course_Level == x) 
+  
+  if (nrow(ratings_by_level) < 10) { # `Course_Level`s with less than ten reviews is not worthy of a visualization, sorry 
+    next 
+  } 
   
   print(ratings_by_level %>% 
     ggplot(aes(x = as.factor(Quality), fill = as.factor(Quality))) + 
@@ -221,12 +284,18 @@ for (x in seq(100, 500, 100)) {
       scale_fill_brewer(palette = "YlOrRd")) 
 } 
 
+``` 
+
+## That's great, but what about for <em>all</em> the courses? 
+Alright, let's start answering some questions: are a majority of the RateMyProfessor reviews inherently negative or positive for <em>all</em> Illinois Tech courses (I guess specifically with respect to the most-recent 20 reviews for each professor). A very simple bar plot below shows that, actually... (drumroll please) 
+```{r} 
 professor_ratings %>% 
   ggplot(aes(x = Quality, fill = as.factor(Quality))) + 
     geom_bar(width = 0.45) + 
     scale_fill_brewer(palette = "RdYlGn") + 
     theme(legend.position = "none") + 
-    labs(title = paste0("Quality of ", abbreviated_subject_name, " Courses"), 
+    labs(title = paste0("Quality of all Illinois Tech Courses"), 
+         subtitle = paste0("n = ", nrow(professor_ratings)), 
          x = "Quality", 
          y = "Count") + 
     geom_vline(aes(xintercept = mean(Quality)), col = 'black', linetype = "dashed") 
@@ -237,14 +306,20 @@ average_quality
 median_quality <- median(professor_ratings$Quality) 
 median_quality 
 
+t.test(professor_ratings$Quality, mu = 3, alternative="greater") 
+``` 
+
+And since we can reuse the code pretty easily, let's also do the same visualization for course difficulty! 
+```{r} 
 professor_ratings %>% 
   ggplot(aes(x = Difficulty, fill = as.factor(Difficulty))) + 
     geom_bar(width = 0.95) + 
     scale_fill_brewer(palette = "YlOrRd") + 
     theme(legend.position = "none") + 
-    labs(title = paste0("Difficulty of ", abbreviated_subject_name, " Courses"), 
+    labs(title = paste0("Difficulty of all Illinois Tech Courses"), 
          x = "Difficulty", 
-         y = "Count") + 
+         y = "Count", 
+         subtitle = paste0("n = ", nrow(professor_ratings))) + 
     geom_vline(aes(xintercept = mean(Difficulty)), col = 'black', linetype = "dashed") 
 
 average_difficulty <- mean(professor_ratings$Difficulty) 
@@ -252,12 +327,64 @@ average_difficulty
 
 median_difficulty <- median(professor_ratings$Difficulty) 
 median_difficulty 
+
 ``` 
 
-Some Basic NLP 
+## What's correlated to `Quality`? 
 ```{r} 
-library(sentimentr) 
-  
+## `QUALITY` CORRELATION MATRIX 
+cor(sapply(professor_ratings[, c(4:5, 8:9, 16:37)], as.numeric))[, 1] # just taking columns that are not characters 
+
+``` 
+
+Now visually exploring some parameters from the correlation matrix above... 
+```{r} 
+# GoodProf vs. Difficulty 
+professor_ratings %>% 
+  mutate(Difficulty = paste0("Difficulty Level ", Difficulty)) %>% 
+  ggplot(aes(x = GoodProf, fill = GoodProf)) + 
+    geom_bar(alpha = 0.9) + 
+    scale_x_discrete(labels=c("No", "Yes")) + 
+    facet_wrap(~Difficulty, ncol = 5) + 
+    scale_fill_manual(values = c("#C73F33", "#479557"), guide = FALSE) 
+
+# GoodProf vs. RESPECTED 
+professor_ratings %>% 
+  filter(TAG_RESPECTED == 1) %>% 
+  mutate(TAG_RESPECTED = ifelse(TAG_RESPECTED == 1, "Mention of Being 'Respected'", "No Mention of Being 'Respected'")) %>% 
+  ggplot(aes(x = GoodProf, fill = GoodProf)) + 
+    geom_bar(alpha = 0.9) + 
+    scale_x_discrete(labels=c("No", "Yes")) + 
+    facet_wrap(~TAG_RESPECTED, ncol = 5) + 
+    scale_fill_manual(values = c("#C73F33", "#479557"), guide = FALSE) 
+
+# GoodProf vs. GIVES_GOOD_FEEDBACK 
+professor_ratings %>% 
+  filter(TAG_GIVES_GOOD_FEEDBACK == 1) %>% 
+  mutate(TAG_GIVES_GOOD_FEEDBACK = ifelse(TAG_GIVES_GOOD_FEEDBACK == 1, "Mention of 'Gives Good Feedback'", "No Mention of 'Gives Good Feedback'")) %>% 
+  ggplot(aes(x = GoodProf, fill = GoodProf)) + 
+    geom_bar(alpha = 0.9) + 
+    scale_x_discrete(labels=c("No", "Yes")) + 
+    facet_wrap(~TAG_GIVES_GOOD_FEEDBACK, ncol = 5) + 
+    scale_fill_manual(values = c("#C73F33", "#479557"), guide = FALSE) 
+
+# GoodProf vs. AMAZING_LECTURES 
+professor_ratings %>% 
+  filter(TAG_AMAZING_LECTURES == 1) %>% 
+  mutate(TAG_AMAZING_LECTURES = ifelse(TAG_AMAZING_LECTURES == 1, "Mention of 'Amazing Lectures'", "No Mention of 'Amazing Lectures'")) %>% 
+  ggplot(aes(x = GoodProf, fill = GoodProf)) + 
+    geom_bar(alpha = 0.9) + 
+    scale_x_discrete(labels=c("No", "Yes")) + 
+    facet_wrap(~TAG_AMAZING_LECTURES, ncol = 5) + 
+    scale_fill_manual(values = c("#C73F33", "#479557"), guide = FALSE) 
+
+``` 
+
+## RMP, meet NLP 
+Even though I’ve already made my point that it’s not all negative (AKA the RMP reviews I pulled are actually much more positive than negative), it’s hard to summarize an entire course’s worth of thoughts into a single `Quality` number. The most useful part of RMP’s system is the extensive comments reviewers leave for each course. If only there was a way to do some sort of “sentiment analysis” on the comments or something... 
+
+Yup – let’s do this. I’m not an NLP-expert by any means, I truly only have experience working with Stanford’s CoreNLP package during my REU last summer, but since the installation is oh-so-very broken on my macOS architecture (Java 8 installation will be the death of me) and I would rather not boot into my Windows Virtual Machine at this moment, I’ll be going with an alternative: `sentimentr`, which is an effective augmented dictionary lookup to determine a numerical sentiment for a sentence. The more negative a rating is, the more negative the sentiment, and vice versa for positive. Do our results for comment sentiment still hold up to our conclusions from above (spoiler warning: yes). 
+```{r warning=FALSE} 
 comment_sentiments <- sentiment(professor_ratings$Comments) 
 
 comment_sentiments %>% 
@@ -265,7 +392,7 @@ comment_sentiments %>%
     geom_histogram(bins = 25, alpha = 0.8) + 
     scale_fill_brewer(palette = "RdYlGn") + 
     theme(legend.position = "none") + 
-    labs(title = paste0("Sentiment Analysis for ", abbreviated_subject_name, " Courses"), 
+    labs(title = paste0("Sentiment Analysis for all Illinois Tech Courses"), 
          x = "Sentiment", 
          y = "Count") + 
     geom_vline(aes(xintercept = mean(sentiment)), col = 'black', linetype = "dashed") 
@@ -278,7 +405,116 @@ median_sentiment
 
 extract_sentiment_terms(professor_ratings$Comments) 
 
-professor_ratings$Comments %>% 
-  sentiment_by(by = NULL) %>% 
-  highlight() 
+# RUN THIS CODE TO GET EXACT COMMENT POLARITY 
+#professor_ratings$Comments %>% 
+#  sentiment_by(by = NULL) %>% 
+#  highlight() 
+
+t.test(comment_sentiments$sentiment, mu = 0, alternative="greater") 
+
 ``` 
+
+## Creating the Final Dataset 
+Let's go ahead and add in our NLP results to the master dataframe. 
+```{r} 
+## MEAN OF SENTIMENTS PER RATING ## 
+rating_sentiments <- comment_sentiments %>% 
+  select(-c("sentence_id")) %>% # drop columns 
+  group_by(element_id) %>% # group by 
+  mutate(sentiment = mean(sentiment)) %>% # mean sentiment 
+  mutate(word_count = sum(word_count, na.rm = TRUE)) %>% # total word count 
+  unique() # remove multiple element_ids with the same value 
+
+## MERGE DATAFRAMES ## 
+professor_ratings$element_id <- seq(1:nrow(professor_ratings)) 
+ratings_and_sentiments <- merge(professor_ratings, rating_sentiments, by = "element_id") 
+
+## DROP SOME ROWS ## 
+ratings_and_sentiments <- ratings_and_sentiments %>% 
+  filter(Course_Level > 0) 
+ratings_and_sentiments$Course_Level <- as.factor(ratings_and_sentiments$Course_Level) 
+head(ratings_and_sentiments) 
+
+ratings_and_sentiments %>% 
+  ggplot(aes(x = sentiment, y = GoodProf)) + 
+    geom_jitter() + 
+    scale_x_continuous(breaks=seq(-2, 2, 0.5)) + 
+    scale_y_discrete(labels=c("No", "Yes")) 
+
+``` 
+
+# "Wow, excellent work so far, but what do you know about modeling?" 
+Well thank you! Let's get into it: I'd ideally like to create two models - one that can predict based off of the `GoodProf` category (which is either yes or no) and one predicting `Quality` (anywhere from 1.0 to 5.0 in increments of 0.5). 
+
+For our first model, since we are dealing with a binary categorical variable, I use the lasso shrinkage method on a standrad logistic regression to be able to filter out any of our numerous parameters that might not be significantly contributing to our model, and then throw only the most significant of parameters into a simple model that is easy to interpret and understand when looking into future modeling solutions. A useless model would predict `GoodProf` correctly about 50% of the time (simple coin toss), a model that just chooses the majority class would get it right ~`r round(nrow(professor_ratings[professor_ratings$Quality >= 3.5, ]) / nrow(professor_ratings) * 100, 2)`% of the time in this instance. I like to think that any model above 70% accuracy holds some weight and anything above 80% deserves a bit of respect. With that, what does this model achieve? 
+
+For the last model, I use a random forest to predict `Quality`, which I expect will have a bit worse accuracy than the above model given the number of possible choices increases from 2 to 9. I have a sweet spot for random forests - they are simple to understand, simple to implement, and simple to prune (because you technically don't have to). Random forests are keen to detecting patterns between all of our different parameters when assigning a `Quality` score, which I believe is prevalent in the data based off of the correlation matrix and visualizations above. I'll only be evaluating the model based off of the parameters kept through lasso over many trials. Since this is a regression-based random forest, I'll be evaluating our `Quality` model using RMSE, ensuring we weight larger errors a bit more, supplied through bootstrapping with 100 resampling iterations, which gives us the expected out-of-sample average amount of error within our estimates. 
+```{r} 
+training <- createDataPartition(ratings_and_sentiments$element_id, p = 0.8, list = FALSE, times = 1) 
+train_control <- trainControl(method = "boot", number = 100) 
+
+# Lasso with Logistic Regression 
+# Perform a lasso regression using the glmnet package specifying a vector of 100 values of lambda for tuning. 
+x <- model.matrix(GoodProf ~ Difficulty + NumHelpful + NumNotHelpful + Date + Course_Level + TAG_TOUGH_GRADER + TAG_GIVES_GOOD_FEEDBACK + TAG_RESPECTED + TAG_GET_READY_TO_READ + TAG_PARTICIPATION_MATTERS + TAG_LOTS_OF_HOMEWORK + TAG_INSPIRATIONAL + TAG_BEWARE_OF_POP_QUIZZES + TAG_ACCESSIBLE_OUTSIDE_CLASS + TAG_SO_MANY_PAPERS + TAG_CLEAR_GRADING_CRITERIA + TAG_HILARIOUS + TAG_TEST_HEAVY + TAG_GRADED_BY_FEW_THINGS + TAG_AMAZING_LECTURES + TAG_CARING + TAG_EXTRA_CREDIT + TAG_GROUP_PROJECTS + TAG_LECTURE_HEAVY + word_count + sentiment, data = ratings_and_sentiments)[ , -1] 
+y <- ratings_and_sentiments$GoodProf 
+grid <- 10^seq(10,-2,length=100) 
+# alpha = 1 for lasso 
+lasso.mod <- glmnet(x[ training, ], y[training], alpha=1, lambda=grid, family="binomial") 
+
+# Using cross-validation to determine the minimum value for lambda 
+cv.out = cv.glmnet(x[training ,], y[training], alpha=1, nfolds = 10, family="binomial") 
+bestlam = cv.out$lambda.min 
+print(paste0("Minimum Value for Lambda: ", bestlam)) # minimum lambda 
+
+## CALCULATE AUC 
+lasso_model_prediction <- predict(cv.out, newx = x[-training,], type = "response") 
+lasso_prediction_object <- prediction(lasso_model_prediction, y[-training]) 
+prf <- performance(lasso_prediction_object, measure = "tpr", x.measure = "fpr") 
+plot(prf) 
+
+auc <- performance(lasso_prediction_object, measure = "auc") 
+auc <- auc@y.values[[1]] 
+auc 
+
+out <- glmnet(x, y, alpha = 1, lambda=grid, family="binomial") 
+lasso.coef <- predict(out, type="coefficients", s=bestlam) 
+coef(cv.out) 
+
+# What is out-of-sample test set performance? 
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = x[-training,]) 
+fitted.results <- ifelse(lasso.pred >= 0.5, 1, 0) 
+test_set <- as.numeric(y[-training]) - 1 
+accuracy <- mean(fitted.results == test_set) 
+print(paste0("Out-of-sample test set accuracy: ", round(accuracy, 4))) 
+
+## RANDOM FOREST ## 
+rf <- train(Quality ~ Difficulty + NumHelpful + NumNotHelpful + Date + Course_Level + TAG_TOUGH_GRADER + TAG_GIVES_GOOD_FEEDBACK + TAG_RESPECTED + TAG_INSPIRATIONAL + TAG_HILARIOUS + TAG_TEST_HEAVY + TAG_GRADED_BY_FEW_THINGS + TAG_AMAZING_LECTURES + TAG_CARING + TAG_GROUP_PROJECTS + TAG_LECTURE_HEAVY + sentiment, data = ratings_and_sentiments, trControl = train_control, method = "ranger") 
+print(rf) 
+print(rf$results[rf$results$RMSE == min(rf$results$RMSE), ]) # what's the minimum RMSE our tree configuration can get? 
+# mtry = Number of variables available for splitting at each tree node. 
+# min.node.size = Number of entries in each node, minimum. 
+# splitrule extratrees = selects a cut-point at random. 
+
+``` 
+
+# Findings 
+* Using IMDb's True Bayesian Rating scale, we discovered that the lowest-rated course at Illinois Tech is CS 553 with the highest-rated course being HUM 380. Reading the review comments for each, it's clear to see just how extreme these two cases are. 
+* With our sample of more-recent RateMyProfessor reviews for each professor at Illinois Institute of Technology, we find with p = 0.01 statistical significance that the average Quality is greater than 3 (neutral) and the average sentiment of comments is greater than 0 (neutral), supporting the hypothesis that RateMyProfessor reviews are not inherently more negative than positive in both quality rating and comment sentiment. 
+* Our logistic regression model correctly predicts whether the review details indiciate the professor recieved a Quality greater than or equal to 3.5 or not with about ~82-86% accuracy on test data. 
+* Our random forest model predicts `Quality` within an average RMSE of ~0.98 units. 
+
+# Future Work 
+There are definitely a lot of limitations here that affect the overall power of the findings. To alleviate this, future work should:  
+
+* Work to scrape <em>all</em> of the ratings from each professor's RMP page, not just the most-recent 20. Doing this will have us work with the full population of ratings, not just a select sample. 
+* Do more preprocessing with columns such as `Grade` and `ForCredit` that have mostly `NA` values in them - although they are sparse, chances are that a good grade received in the course can predict a more positive review. 
+* Improve the model quality by further parameter tuning and weighting. Doing the suggestions above might be effective enough in model improvement, however, as more data tends to lend to a more confident model. 
+* Deal with `Course`s that have only numbers in them in a more elegant way rather than just marking them as -1 in the `Course_Number` and `Course_Level`. 
+* It could benefit the model performance to standardize sentiments so more extreme sentiments are evident compared to mostly neutral ones. See if that does anything for the model results. 
+* Incorporate the model into other schools' RMP pages - do the results still hold up, or are they only specific to Illinois Institute of Technology course reviews? 
+* Explore the hypothesis that students tend to only write "extreme" reviews for RateMyProfessor (either really good or really bad quality) and not for professors they felt more neutral on. 
+* See how different RMP reviews are compared to the mandatory course reviews conducted through Illinois Tech's own system. 
+* Explore common keywords in reviews and see how these keywords relate to assigned `Quality` score in any way. 
+
+### "I'm absolutely floored - you're hired!" 
+You won't regret it! 
